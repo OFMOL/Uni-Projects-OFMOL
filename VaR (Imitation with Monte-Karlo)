@@ -1,0 +1,110 @@
+import numpy as np
+import pandas as pd
+import datetime as dt
+import requests
+import matplotlib.pyplot as plt
+from scipy.stats import norm
+
+#Cоздаем список акций за которыми хотим наблюдать ( Газпром, Сбер, Роснефть, ВТБ, Яндекс )
+
+tickers = ['GAZP', 'SBER', 'ROSN', 'VTBR', 'YNDX']
+start_date = '2023-01-01'
+end_date = '2024-01-01'
+
+
+# Получеаем данные о котировках с MOEX API (Московская биржа)
+def get_moex_data(ticker, start_date, end_date):
+    url = f'https://iss.moex.com/iss/history/engines/stock/markets/shares/securities/{ticker}.json'
+    params = {
+        'from': start_date,
+        'till': end_date
+    }
+    response = requests.get(url, params=params)
+    data = response.json()
+
+    # Преобразование данных в DataFrame
+    columns = data['history']['columns']
+    rows = data['history']['data']
+    df = pd.DataFrame(rows, columns=columns)
+
+    # Преобразование дат в формат datetime
+    df['TRADEDATE'] = pd.to_datetime(df['TRADEDATE'])
+    df.set_index('TRADEDATE', inplace=True)
+
+    # Удаление дублирующихся дат
+    df = df[~df.index.duplicated(keep='first')]
+    return df
+
+adj_close_df = pd.DataFrame()
+# Запрос данных по каждому тикеру и добавление в DataFrame
+for ticker in tickers:
+    data = get_moex_data(ticker, start_date, end_date)
+    adj_close_df[ticker] = data['CLOSE']
+print(adj_close_df)
+
+
+
+# Расчет логарифмических доходностей:(Вычисляются ежедневные логарифмические доходности акций и удаляются строки с пропущенными значениями)
+log_returns = np.log(adj_close_df/adj_close_df.shift(1)) #берет строчку и делим на строчку перед ней и берет логарифм о этого значения
+log_returns = log_returns.dropna()#удаляем первую строку потому что нам не с чем ее стравнивать
+
+
+
+#Определение функций для расчета ожидаемой доходности и стандартного отклонения портфеля:
+#Ожидаемая доходность портфеля на основе весов активов
+def expected_return (weights, log_return):
+    return np.sum(log_returns.mean()*weights)
+
+#вычисляет стандартное отклонение портфеля на основе ковариационной матрицы доходностей.
+def standard_deviation (weights, cov_matrix):
+    variance = weights.T @cov_matrix @weights #transposition of the weights and we multiplay it with coveriance matrix and the original weights
+    return np.sqrt(variance) #дисперсия это квадрат отклонения
+
+#Создание ковариационной матрицы доходностей:
+cov_matrix =log_returns.cov() #(беред одно значение и измеряет его с другим столбцы и строки одно и то же)
+
+
+#Создание равновзвешенного портфеля и расчет его показателей:
+# - Задаются равные веса для всех активов в портфеле.
+# - Вычисляются ожидаемая доходность и стандартное отклонение портфеля.
+
+portfolio_value = 1000000
+weights = np.array ([1/len(tickers)]*len(tickers))#(1/5)
+portfolio_expected_return = expected_return(weights, log_returns)
+portfolio_std_dev = standard_deviation (weights, cov_matrix)
+
+
+#Определение функции для генерации случайного z-значения:
+def random_z_score():
+    return np.random.normal(0,1)
+
+# Расчет сценариев доходности/убытка портфеля:
+# Для указанного количества дней (5 дней) и заданного количества симуляций (10000) рассчитываются возможные сценарии доходности/убытка портфеля с использованием случайных z-значений.
+days = 5
+def scenario_gain_loss(portfolio_value, portfolio_std_dev, z_score, days):
+    return portfolio_value + portfolio_expected_return * days +portfolio_value *portfolio_std_dev *z_score *np.sqrt(days)
+
+# сколько будет равно среднее ожидание по заработку за указаное количество дней
+# вторая часть (имитация основанная на portfolio_std_deviation и в зависимости от того наше число z будет положительным или отрицательным мы получим плюс или минус)
+
+simulations =10000
+scenarioReturn =[]
+
+for i in range(simulations):
+    z_score = random_z_score()
+    scenarioReturn.append(scenario_gain_loss(portfolio_value, portfolio_std_dev, z_score, days))
+
+
+# Расчет VaR (Value at Risk):
+#- Определяется доверительный интервал (95%) и рассчитывается VaR, который показывает потенциальный убыток портфеля с заданной вероятностью.
+confidence_interval =0.95
+VaR = -np.percentile(scenarioReturn,100*(1-confidence_interval))
+
+#plot the results of all 10000 scenarios
+plt.hist(scenarioReturn, bins=100, density = True)
+plt.xlabel('Scenario Gain/Loss')
+plt.ylabel('Frequency')
+plt.title ('Distribution of Portfolio Gain/Loss Over {days} Days')
+plt.axvline(-VaR, color='r', linestyle='dashed', linewidth=2, label='VaR at {confidence_interval:.0%} confidence level')
+plt.legend()
+plt.show()
